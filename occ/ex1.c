@@ -128,7 +128,8 @@ void *worker(void *arg)
                 Database[k].val = tx.values[k];
             }
 #if DEBUG
-            printf("tx.values[%d]=%d Database[%d].val=%d\n",k,tx.values[k],k,Database[k].val);
+            printf("tx.values[%d]=%d Database[%d].val=%d\n",
+                   k,tx.values[k],k,Database[k].val);
 #endif
         }
         tx_seq[tid_global] = tx;
@@ -141,7 +142,8 @@ void *worker(void *arg)
     t_end = get_time();
     t_elap = (t_end-t_begin)*1e-6;
     t_lock = tsum*1e-6;
-    printf("time: elap=%f lock=%f lock_ratio=%f n_abort=%d n_commit=%d\n",t_elap,t_lock,t_lock/t_elap,n_abort,n_commit);
+    printf("time: elap=%f lock=%f lock_ratio=%f n_abort=%d n_commit=%d\n",
+           t_elap,t_lock,t_lock/t_elap,n_abort,n_commit);
 
     return NULL;
 }
