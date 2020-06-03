@@ -3,10 +3,13 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <math.h>
 #include <time.h>
 
+#define FORWARD_ALGORITHM 0
+#define SECOND_ALGORITHM 0
 #define DEBUG 0
 
 #if DEBUG
@@ -45,6 +48,11 @@ TX tx_seq[N_REPEAT*NUM_THREADS];
 int tid_global=0;
 pthread_mutex_t giant_lock;
 
+#if FORWARD_ALGORITHM
+TX *act_tx[NUM_THREADS];
+int act_tx_len = 0;
+#endif
+
 static struct timespec start_time;
 
 void init_time()
@@ -60,6 +68,32 @@ int get_time()
 }
 
 
+void delete_from_set(TX **a, int *n, TX *item)
+{
+    int i=0;
+    for (; i<*n; i++) {
+        if (a[i]==item) {
+            (*n)--;
+            break;
+        }
+    }
+    for (; i<*n; i++) {
+        a[i] = a[i+1];
+    }
+}
+
+
+#define LOCK()                              \
+    {                                       \
+        t = get_time();                     \
+        pthread_mutex_lock(&giant_lock);    \
+        tsum += get_time() - t;             \
+    }
+#define UNLOCK()                            \
+    {                                       \
+        pthread_mutex_unlock(&giant_lock);  \
+    }
+
 void *worker(void *arg)
 {
     XACT *xact = (XACT*)arg;
@@ -70,6 +104,10 @@ void *worker(void *arg)
     TX tx;
     int n_abort=0;
     int n_commit=0;
+#if FORWARD_ALGORITHM
+        int n_act;
+        TX *fin_act_tx[NUM_THREADS];
+#endif
 
     for (int repeat=0; repeat < N_REPEAT; repeat++) {
 
@@ -99,21 +137,74 @@ void *worker(void *arg)
         }
 
         // Validation
-        t = get_time();
-        pthread_mutex_lock(&giant_lock);
-        tsum += get_time() - t;
+#if FORWARD_ALGORITHM
+        LOCK();
+        tid_end = tid_global;
+        n_act = act_tx_len;
+        if (act_tx_len>0)
+            memcpy(fin_act_tx, act_tx, sizeof(TX*)*act_tx_len);
+        act_tx[act_tx_len] = &tx;
+        act_tx_len++;
+        UNLOCK();
+
+        for (int i = tid_start; i < tid_end; i++) {
+            for (int k=0; k<NUM_DATA; k++) {
+                // writeset of tid intersects my readset
+                if (tx_seq[i].types[k] & WRITE && tx.types[k] & READ) {
+                    // abort
+                    LOCK();
+                    delete_from_set(act_tx,&act_tx_len,&tx);
+                    UNLOCK();
+                    n_abort += 1;
+                    goto retry;
+                }
+            }
+        }
+        for (int i = 0; i < n_act; i++) {
+            for (int k=0; k<NUM_DATA; k++) {
+                // writeset of tid intersects my readset
+                if (fin_act_tx[i]->types[k] & WRITE && tx.types[k] & (READ|WRITE)) {
+                    // abort
+                    LOCK();
+                    delete_from_set(act_tx,&act_tx_len,&tx);
+                    UNLOCK();
+                    n_abort += 1;
+                    goto retry;
+                }
+            }
+        }
+
+#else // backward-oriented OCC
+
+#if SECOND_ALGORITHM
         tid_end = tid_global;
         for (int i = tid_start; i < tid_end; i++) {
             for (int k=0; k<NUM_DATA; k++) {
                 // writeset of tid intersects my readset
                 if (tx_seq[i].types[k] & WRITE && tx.types[k] & READ) {
                     // abort
-                    pthread_mutex_unlock(&giant_lock);
                     n_abort += 1;
                     goto retry;
                 }
             }
         }
+        tid_start = tid_end;
+#endif
+        LOCK();
+        tid_end = tid_global;
+        for (int i = tid_start; i < tid_end; i++) {
+            for (int k=0; k<NUM_DATA; k++) {
+                // writeset of tid intersects my readset
+                if (tx_seq[i].types[k] & WRITE && tx.types[k] & READ) {
+                    // abort
+                    UNLOCK();
+                    n_abort += 1;
+                    goto retry;
+                }
+            }
+        }
+
+#endif // FORWARD_ALGORITHM
 
 #if DEBUG
         for (int i=0; i<TX_LEN; i++) {
@@ -132,9 +223,14 @@ void *worker(void *arg)
                    k,tx.values[k],k,Database[k].val);
 #endif
         }
+
+#if FORWARD_ALGORITHM
+        LOCK();
+        delete_from_set(act_tx,&act_tx_len,&tx);
+#endif
         tx_seq[tid_global] = tx;
         tid_global += 1;
-        pthread_mutex_unlock(&giant_lock);
+        UNLOCK();
         n_commit += 1;
 
         xact += TX_LEN;
