@@ -19,9 +19,11 @@
 #else
 #define NUM_THREADS 4
 #define NUM_DATA 10
+//#define NUM_DATA 30
 #define TX_LEN 30
-//#define N_REPEAT (400000/NUM_THREADS)
-#define N_REPEAT (4000/NUM_THREADS)
+//#define TX_LEN 10
+#define N_REPEAT (400000/NUM_THREADS)
+//#define N_REPEAT (4000/NUM_THREADS)
 #endif
 
 typedef struct _DATA {
@@ -97,14 +99,9 @@ void *worker(void *arg)
 
     retry:
 
-        //printf("%d:phase1\n",repeat);
-        // Phase 1 (lock)
+        // read phase
         commit_tid = 0;
         for (int k=0; k<NUM_DATA; k++) {
-            // lock write set
-            if (type[k] & WRITE) {
-                LOCK(k);
-            }
             // read data
             if (type[k] & READ) {
                 int t;
@@ -121,6 +118,16 @@ void *worker(void *arg)
             }
         }
 
+        //printf("%d:phase1\n",repeat);
+        // Phase 1 (lock)
+        commit_tid = 0;
+        for (int k=0; k<NUM_DATA; k++) {
+            // lock write set
+            if (type[k] & WRITE) {
+                LOCK(k);
+            }
+        }
+
         //printf("%d:phase2\n",repeat);
         // Phase 2 (validate)
         for (int k=0; k<NUM_DATA; k++) {
@@ -133,6 +140,7 @@ void *worker(void *arg)
                     }
                 }
                 n_abort += 1;
+                usleep(3);
                 goto retry;
             }
         }
