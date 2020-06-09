@@ -139,6 +139,13 @@ void *worker(void *arg)
 
         // Validation
 #if FORWARD_ALGORITHM
+        /* 3rd algorithm
+        tend = (
+        〈finish tn := tnc;
+        　finish active := (make a copy of active);
+        　active := active ∪ { id of this transaction } 〉;
+        　valid := true;
+        */
         LOCK();
         tid_end = tid_global;
         n_act = act_tx_len;
@@ -148,6 +155,11 @@ void *worker(void *arg)
         act_tx_len++;
         UNLOCK();
 
+        /*
+        　for t from start tn + 1 to finish tn do
+        　　if (write set of transaction with transaction number t intersects read set)
+        　　　then valid := false;
+        */
         for (int i = tid_start; i < tid_end; i++) {
             for (int k=0; k<NUM_DATA; k++) {
                 // writeset of tid intersects my readset
@@ -162,6 +174,11 @@ void *worker(void *arg)
                 }
             }
         }
+        /*
+        　for i ∊ finish active do
+        　　if (write set of transaction Ti intersects read set or write set)
+        　　　then valid := false;
+        */
         for (int i = 0; i < n_act; i++) {
             for (int k=0; k<NUM_DATA; k++) {
                 // writeset of tid intersects my readset
@@ -180,6 +197,17 @@ void *worker(void *arg)
 #else // backward-oriented OCC
 
 #if SECOND_ALGORITHM
+        /* 2nd algorithm
+         tend := (
+         　mid tn := tnc;
+         　for t from start tn + 1 to mid tn do
+         　  if (write set of transaction with transaction number t intersects read set)
+         　　  then valid := false;
+         〈finish tn := tnc;
+         　for t from mid tn + 1 to finish tn do
+         　　if (write set of transaction with transaction number t intersects read set)
+         　　　then valid := false;
+         */
         tid_end = tid_global;
         for (int i = tid_start; i < tid_end; i++) {
             for (int k=0; k<NUM_DATA; k++) {
@@ -193,7 +221,16 @@ void *worker(void *arg)
             }
         }
         tid_start = tid_end;
-#endif
+
+#endif // SECOND_ALGORITHM
+
+        /* 1st algorithm
+        tend = (
+        〈finish tn := tnc;
+        　for t from start tn + 1 to finish tn do
+        　　if (write set of transaction with transaction number t intersects read set)
+        　　　then valid := false;
+         */
         LOCK();
         tid_end = tid_global;
         for (int i = tid_start; i < tid_end; i++) {
@@ -230,9 +267,27 @@ void *worker(void *arg)
         }
 
 #if FORWARD_ALGORITHM
+        /*
+        　if valid
+        　　then (
+        　　　(write phase);
+        　　〈 tnc := tnc + 1;  tn := tnc;
+        　　　 active := active - (id of this transaction) 〉 ;
+        　　　(cleanup))
+        　　else (
+        　　〈 active := active - { id of transaction} 〉;
+        　　　(backup))).
+         */
         LOCK();
         delete_from_set(act_tx,&act_tx_len,&tx);
 #endif
+        /*
+         　if valid
+         　　then ((write phase); tnc := tnc + 1; tn := tnc)〉;
+         　if valid
+         　　then (cleanup)
+         　　else (backup)).
+         */
         tx_seq[tid_global] = tx;
         tid_global += 1;
         UNLOCK();
