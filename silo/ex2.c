@@ -18,12 +18,12 @@
 #define N_REPEAT (12/NUM_THREADS)
 #else
 #define NUM_THREADS 4
-//#define NUM_DATA 10
-#define NUM_DATA 30
-//#define TX_LEN 30
-#define TX_LEN 10
-//#define N_REPEAT (400000/NUM_THREADS)
-#define N_REPEAT (4000/NUM_THREADS)
+#define NUM_DATA 10
+//#define NUM_DATA 30
+#define TX_LEN 30
+//#define TX_LEN 10
+#define N_REPEAT (400000/NUM_THREADS)
+//#define N_REPEAT (4000/NUM_THREADS)
 #endif
 
 typedef struct _DATA {
@@ -75,18 +75,16 @@ int get_time()
     }
 
 inline static void my_lock(bool *ptr) {
-    bool expected=false;
-    bool desired=true;
-
-    for (int i=0; ;i++) {
+    for (;;) {
+        bool expected=false;
+        bool desired=true;
         if (*ptr == expected) {
             if (__atomic_compare_exchange_n(ptr, &expected, desired, false,
                                       __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-                if (i>=10) printf("lock loop=%d\n",i);
                 return;
             }
         }
-        usleep(10);
+        usleep(1);
     }
 }
 
@@ -107,9 +105,7 @@ void *worker(void *arg)
     int n_abort=0;
     int n_commit=0;
     int commit_tid;
-    char s[NUM_DATA*4+1];
     char stype[5] = "?rwm";
-    bool prelocked=false;
 
     for (int repeat=0; repeat < N_REPEAT; repeat++) {
         int n_retry=0;
@@ -142,46 +138,15 @@ void *worker(void *arg)
             }
         }
 
-        prelocked = false;
-        for (int k=0; k<NUM_DATA; k++) {
-            if (Database[k].lock) {
-                s[k] = 'x';
-                prelocked = true;
-            } else {
-                s[k] = '_';
-            }
-        }
-        s[NUM_DATA] = 0;
-        //if (prelocked) printf("%d:prelock[%s]\n",thread_id,s);
-
         // Phase 1 (lock)
-        //printf("%d:phase1\n",repeat);
         for (int k=0; k<NUM_DATA; k++) {
             // lock write set
             if (type[k] & WRITE) {
                 LOCK(k);
             }
         }
-        //for (int j=0; j<NUM_DATA; j++) {
-        //    s[j*4]   = stype[type[j]];
-        //    s[j*4+1] = 'v';
-        //    s[j*4+2] = (Database[j].lock) ? 'x' : '_';
-        //    s[j*4+3] = ' ';
-        //}
-        //s[NUM_DATA*4-1] = 0;
-        for (int j=0; j<NUM_DATA; j++) {
-            s[j] = (Database[j].lock) ? 'x' : '_';
-        }
-        s[NUM_DATA] = 0;
-        //if (prelocked) printf("%d:aftlock[%s]\n",thread_id,s);
-        for (int j=0; j<NUM_DATA; j++) {
-            s[j] = (type[j]&WRITE) ? 'w' : ' ';
-        }
-        s[NUM_DATA] = 0;
-        //if (prelocked) printf("%d:       [%s]\n",thread_id,s);
 
         // Phase 2 (validate)
-        //printf("%d:phase2\n",repeat);
         for (int k=0; k<NUM_DATA; k++) {
             if ( ((type[k]&READ) && tid[k]!=Database[k].tid) ||
                  ((type[k]==READ) && Database[k].lock) ) {
@@ -205,14 +170,7 @@ void *worker(void *arg)
                         UNLOCK(j);
                     }
                 }
-                //for (int j=0; j<NUM_DATA; j++) {
-                //    s[j*4]   = stype[type[j]];
-                //    s[j*4+1] = '0' + (Database[j].tid-tid[j]);
-                //    s[j*4+2] = (Database[j].lock) ? 'x' : '_';
-                //    s[j*4+3] = ' ';
-                //}
-                //s[NUM_DATA*4] = 0;
-                usleep(50);
+                usleep(3);
                 goto retry;
             }
         }
@@ -235,7 +193,6 @@ void *worker(void *arg)
 #endif
 
         // Phase 3 (write)
-        //printf("%d:phase3\n",repeat);
         for (int k=0; k<NUM_DATA; k++) {
             if (type[k] & WRITE) {
                 Database[k].val = val[k];
