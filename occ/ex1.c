@@ -11,6 +11,7 @@
 #define FORWARD_ALGORITHM 0
 #define SECOND_ALGORITHM 0
 #define DEBUG 0
+#define ABORT_USLEEP 1
 
 #if DEBUG
 #define NUM_THREADS 4
@@ -156,6 +157,7 @@ void *worker(void *arg)
                     delete_from_set(act_tx,&act_tx_len,&tx);
                     UNLOCK();
                     n_abort += 1;
+                    usleep(ABORT_USLEEP);
                     goto retry;
                 }
             }
@@ -169,6 +171,7 @@ void *worker(void *arg)
                     delete_from_set(act_tx,&act_tx_len,&tx);
                     UNLOCK();
                     n_abort += 1;
+                    usleep(ABORT_USLEEP);
                     goto retry;
                 }
             }
@@ -184,6 +187,7 @@ void *worker(void *arg)
                 if (tx_seq[i].types[k] & WRITE && tx.types[k] & READ) {
                     // abort
                     n_abort += 1;
+                    usleep(ABORT_USLEEP);
                     goto retry;
                 }
             }
@@ -199,6 +203,7 @@ void *worker(void *arg)
                     // abort
                     UNLOCK();
                     n_abort += 1;
+                    usleep(ABORT_USLEEP);
                     goto retry;
                 }
             }
