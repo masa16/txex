@@ -120,7 +120,6 @@ void *worker(void *arg)
 
         //printf("%d:phase1\n",repeat);
         // Phase 1 (lock)
-        commit_tid = 0;
         for (int k=0; k<NUM_DATA; k++) {
             // lock write set
             if (type[k] & WRITE) {
