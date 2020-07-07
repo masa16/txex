@@ -21,8 +21,8 @@
 #define TX_LEN 5
 #define DPRINTF(...) std::printf(__VA_ARGS__)
 #else
-#define N_TRANSACTION 400000
-#define NUM_THREADS 4
+#define N_TRANSACTION 280000
+#define NUM_THREADS 28
 #define NUM_DATA 50
 #define TX_LEN 10
 #define DPRINTF(...) {}
@@ -61,21 +61,31 @@ typedef struct _ThreadResult {
 class DataItem {
     std::list<VersionValue> list;
     std::list<ReadRange> read_range;
+    Value v0;
     std::shared_mutex mtx;
 public:
     DataItem() : DataItem(0) {}
-    DataItem(Value value) : list(1,{0,value}), read_range(0) {}
+    DataItem(Value value) : list(0), read_range(0), v0(value) {}
 
     Value read(int timestamp) {
-        Value value = list.begin()->value; // read first_item == max_version
-        int ver = list.begin()->version;
+        Value value;
+        int ver;
+        // read first_item == max_version
+        if (list.empty()) {
+            ver = 0;
+            value = v0;
+        } else {
+            value = list.begin()->value;
+            ver = list.begin()->version;
+        }
         std::shared_lock<std::shared_mutex> lock(mtx);
         if (timestamp >= ver) {
             if (timestamp > ver + 1) {
+                // record ri[xj], i=rd_ts, j=wr_ver
                 DPRINTF("r%d(x%d)",timestamp,ver);
                 for (auto itr = read_range.begin(); ; itr++) {
                     if (itr == read_range.end() || itr->wr_ver < ver) {
-                        read_range.insert(itr, {ver,timestamp});
+                        read_range.insert(itr, {ver,timestamp}); // must be atomic
                         break;
                     } else
                     if (itr->wr_ver == ver) {
@@ -110,28 +120,25 @@ public:
         for (auto itr = list.begin(); itr != list.end(); itr++) {
             if (itr->version == timestamp) {
                 itr->value = value;
-                break;
+                return true;
             } else
-                if (itr->version < timestamp) {
-                    VersionValue vv = {timestamp,value};
-                    list.insert(itr, vv);
-                    break;
-                }
+            if (itr->version < timestamp) {
+                VersionValue vv = {timestamp,value};
+                list.insert(itr, vv); // must be atomic
+                return true;
+            }
         }
+        VersionValue vv = {timestamp,value};
+        list.emplace_back(vv); // must be atomic
         return true;
     }
 
     void gc(int timestamp) {
         std::lock_guard<std::shared_mutex> lock(mtx);
-        if (!list.empty()) {
-            for (auto itr=list.begin(); itr->version!=0;) {
-                auto itr2=itr;
-                itr2++;
-                if (itr->version < timestamp) {
-                    list.erase(itr);
-                }
-                itr=itr2;
-            }
+        while (!list.empty()) {
+            int v = list.back().version;
+            if (v >= timestamp) break;
+            list.pop_back();
         }
         while (!read_range.empty()) {
             int v = read_range.back().wr_ver;
@@ -145,6 +152,7 @@ public:
         for (auto itr = list.begin(); itr != list.end(); itr++) {
             printf("%d:%d,",itr->version,itr->value);
         }
+        printf("%d:%d",0,v0);
         printf("}\n");
         printf("ri[xj](n=%ld){",std::distance(read_range.begin(),read_range.end()));
         for (auto itr = read_range.begin(); itr != read_range.end(); itr++) {
