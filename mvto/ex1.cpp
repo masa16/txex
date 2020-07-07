@@ -56,8 +56,8 @@ typedef struct _VersionValue {
 } VersionValue;
 
 typedef struct _ReadRange {
+    int wr_ver;
     int rd_ts;
-    int tx_ts;
 } ReadRange;
 
 typedef struct _ThreadResult {
@@ -84,13 +84,13 @@ public:
                 printf("r%d(x%d)",timestamp,ver);
 #endif
                 for (auto itr = read_range.begin(); ; itr++) {
-                    if (itr == read_range.end() || itr->rd_ts < ver) {
+                    if (itr == read_range.end() || itr->wr_ver < ver) {
                         read_range.insert(itr, {ver,timestamp});
                         break;
                     } else
-                    if (itr->rd_ts == ver) {
-                        if (itr->tx_ts < timestamp) {
-                            itr->tx_ts = timestamp;
+                    if (itr->wr_ver == ver) {
+                        if (itr->rd_ts < timestamp) {
+                            itr->rd_ts = timestamp;
                         }
                         break;
                     }
@@ -109,12 +109,12 @@ public:
     }
 
     bool write(int timestamp, Value value) {
-        // ri[xj], j=rd_ts < timestamp < i=tx_ts
+        // ri[xj], j=wr_ver < timestamp < i=rd_ts
         std::shared_lock<std::shared_mutex> lock(mtx);
         for (auto itr = read_range.begin(); itr != read_range.end(); ++itr) {
-            if (itr->rd_ts < timestamp && timestamp < itr->tx_ts) {
+            if (itr->wr_ver < timestamp && timestamp < itr->rd_ts) {
 #if DEBUG
-                printf("(abort %d<%d<%d)\n", itr->rd_ts, timestamp, itr->tx_ts);
+                printf("(abort %d<%d<%d)\n", itr->wr_ver, timestamp, itr->rd_ts);
 #endif
                 return false;
             }
@@ -149,7 +149,7 @@ public:
             }
         }
         while (!read_range.empty()) {
-            int v = read_range.back().rd_ts;
+            int v = read_range.back().wr_ver;
             if (v >= timestamp) break;
             read_range.pop_back();
         }
@@ -163,7 +163,7 @@ public:
         printf("}\n");
         printf("ri[xj](n=%ld){",std::distance(read_range.begin(),read_range.end()));
         for (auto itr = read_range.begin(); itr != read_range.end(); itr++) {
-            printf("%d:%d,",itr->tx_ts,itr->rd_ts);
+            printf("%d:%d,",itr->rd_ts,itr->wr_ver);
         }
         printf("}\n");
     }
