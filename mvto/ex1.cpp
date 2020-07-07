@@ -1,24 +1,16 @@
-/* g++ ex1.cpp -o ex1 -g -W -Wall -lpthread  */
-
-#include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <math.h>
-#include <time.h>
+/* g++ ex1.cpp -o ex1 -g -std=c++17 -W -Wall -lpthread  */
 
 #include <atomic>
-#include <iostream>
-#include <vector>
-#include <unordered_map>
-#include <random>
-#include <thread>
-#include <mutex>
-#include <shared_mutex>
-#include <list>
-#include <unordered_map>
+#include <chrono>
 #include <functional>
+#include <iostream>
+#include <list>
+#include <mutex>
+#include <random>
+#include <shared_mutex>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 #define DEBUG 0
 
@@ -27,13 +19,13 @@
 #define NUM_THREADS 4
 #define NUM_DATA 10
 #define TX_LEN 5
+#define DPRINTF(...) std::printf(__VA_ARGS__)
 #else
-//#define N_REPEAT (400000/NUM_THREADS)
-//#define N_REPEAT (12000/NUM_THREADS)
 #define N_TRANSACTION 400000
 #define NUM_THREADS 4
 #define NUM_DATA 50
 #define TX_LEN 10
+#define DPRINTF(...) {}
 #endif
 #define N_REPEAT (N_TRANSACTION/NUM_THREADS)
 
@@ -80,9 +72,7 @@ public:
         std::shared_lock<std::shared_mutex> lock(mtx);
         if (timestamp >= ver) {
             if (timestamp > ver + 1) {
-#if DEBUG
-                printf("r%d(x%d)",timestamp,ver);
-#endif
+                DPRINTF("r%d(x%d)",timestamp,ver);
                 for (auto itr = read_range.begin(); ; itr++) {
                     if (itr == read_range.end() || itr->wr_ver < ver) {
                         read_range.insert(itr, {ver,timestamp});
@@ -113,22 +103,17 @@ public:
         std::shared_lock<std::shared_mutex> lock(mtx);
         for (auto itr = read_range.begin(); itr != read_range.end(); ++itr) {
             if (itr->wr_ver < timestamp && timestamp < itr->rd_ts) {
-#if DEBUG
-                printf("(abort %d<%d<%d)\n", itr->wr_ver, timestamp, itr->rd_ts);
-#endif
+                DPRINTF("(abort %d<%d<%d)\n", itr->wr_ver, timestamp, itr->rd_ts);
                 return false;
             }
         }
         for (auto itr = list.begin(); itr != list.end(); itr++) {
-            //printf("[%d,%d,%d(%d)]\n",timestamp,i1->version,itr->version,value);
             if (itr->version == timestamp) {
                 itr->value = value;
-                //printf("w%d(%d)",timestamp,value);
                 break;
             } else
                 if (itr->version < timestamp) {
                     VersionValue vv = {timestamp,value};
-                    //printf("W%d,%d,%d(%d)",timestamp,i1->version,itr->version,value);
                     list.insert(itr, vv);
                     break;
                 }
@@ -211,9 +196,7 @@ public:
         }
         if (ts1>0 && ts1-ts0 > 10) {
             gc_count_.fetch_add(1);
-#if DEBUG
-            printf("\nGC: ts0=%d ts1=%d ts_list.size=%ld\n",ts0,ts1,ts_list.size());
-#endif
+            DPRINTF("\nGC: ts0=%d ts1=%d ts_list.size=%ld\n",ts0,ts1,ts_list.size());
             for (int i=0; i<NUM_DATA; i++) {
                 database[i].gc(ts1);
             }
@@ -264,7 +247,7 @@ void worker(int thread_id, std::vector<std::vector<XACT>> *xact_vec,
                 if (!success) {
                     n_abort++;
                     tsg->transaction_end(ts,database);
-                    usleep(1);
+                    std::this_thread::sleep_for(std::chrono::nanoseconds(1));
                     goto retry;
                 }
             }
@@ -273,7 +256,6 @@ void worker(int thread_id, std::vector<std::vector<XACT>> *xact_vec,
     }
     result->t_elap = t_elap = timer.get_time();
     result->n_abort = n_abort;
-    //t_lock = tsum*1e-6;
     printf("thread%d: throughput=%f[tpx] time=%f[s] n_abort=%d abort_ratio=%f\n",
            thread_id,N_REPEAT/t_elap,t_elap,n_abort,n_abort*1.0/N_REPEAT);
 }
@@ -290,31 +272,22 @@ int main(){
     // Create Transaction
     sum = 0;
     for(int i=0; i<NUM_THREADS; i++){
-#if DEBUG
-        std::cout << "thread" << i << ":";
-#endif
+        DPRINTF("thread%d:",i);
         for(int j=0; j<N_REPEAT; j++){
             for (int k=0; k<TX_LEN; k++) {
                 XACT &x = xact[i][j][k];
                 x.type = rand_type(mt) ? READ : WRITE;
                 x.key = rand_key(mt);
-#if DEBUG
-                std::cout << ((xact[i][j][k].type==READ) ? "r":"w") << xact[i][j][k].key;
-#endif
+                DPRINTF("%s%d",(xact[i][j][k].type==READ) ? "r":"w",xact[i][j][k].key);
                 if (xact[i][j][k].type==READ) {
                     sum += 1;
                 }
             }
-#if DEBUG
-            std::cout << " ";
-#endif
+            DPRINTF(" ");
         }
-#if DEBUG
-        std::cout << std::endl;
-#endif
+        DPRINTF("\n");
     }
 
-    //std::vector<DataItem> database(NUM_DATA,0);
     DataItem database[NUM_DATA];
     TimeStampGenerator tsg;
 
