@@ -45,11 +45,13 @@ typedef struct _XACT {
 typedef struct _VersionValue {
     int version;
     Value value;
+    std::atomic<struct _VersionValue*> next;
 } VersionValue;
 
 typedef struct _ReadRange {
     int wr_ver;
     int rd_ts;
+    std::atomic<struct _ReadRange*> next;
 } ReadRange;
 
 typedef struct _ThreadResult {
@@ -59,38 +61,43 @@ typedef struct _ThreadResult {
 
 
 class DataItem {
-    std::list<VersionValue> list;
-    std::list<ReadRange> read_range;
-    Value v0;
+    VersionValue list_end = {0,0,NULL};
+    VersionValue list_begin = {0,0,&list_end};
+    ReadRange range_end = {0,0,NULL};
+    ReadRange range_begin = {0,0,&range_end};
     std::shared_mutex mtx;
 public:
-    DataItem() : DataItem(0) {}
-    DataItem(Value value) : list(0), read_range(0), v0(value) {}
+    //DataItem() : DataItem(0) {}
+    //DataItem(Value value) : list(0), read_range(0), v0(value) {}
 
     Value read(int timestamp) {
-        Value value;
-        int ver;
-        // read first_item == max_version
-        if (list.empty()) {
-            ver = 0;
-            value = v0;
-        } else {
-            value = list.begin()->value;
-            ver = list.begin()->version;
-        }
         std::shared_lock<std::shared_mutex> lock(mtx);
+        VersionValue *x = list_begin.next.load();
+        // read first_item == max_version
+        Value value = x->value;
+        int ver = x->version;
         if (timestamp >= ver) {
             if (timestamp > ver + 1) {
                 // record ri[xj], i=rd_ts, j=wr_ver
                 DPRINTF("r%d(x%d)",timestamp,ver);
-                for (auto itr = read_range.begin(); ; itr++) {
-                    if (itr == read_range.end() || itr->wr_ver < ver) {
-                        read_range.insert(itr, {ver,timestamp}); // must be atomic
+                for (auto i = &range_begin; ; i=i->next.load()) {
+                retry:
+                    ReadRange *x = i->next.load();
+                    if (x->next.load() == NULL || x->wr_ver < ver) {
+                        ReadRange *m = (ReadRange *)malloc(sizeof(ReadRange));
+                        m->wr_ver = ver;
+                        m->rd_ts = timestamp;
+                        m->next.store(x);
+                        bool b = i->next.compare_exchange_weak(x,m);
+                        if (!b) {
+                            free(m);
+                            goto retry;
+                        }
                         break;
                     } else
-                    if (itr->wr_ver == ver) {
-                        if (itr->rd_ts < timestamp) {
-                            itr->rd_ts = timestamp;
+                    if (x->wr_ver == ver) {
+                        if (x->rd_ts < timestamp) {
+                            x->rd_ts = timestamp;
                         }
                         break;
                     }
@@ -98,9 +105,9 @@ public:
             }
         } else {
             // find max_version with <= timestamp
-            for (auto itr = list.begin(); itr != list.end(); ++itr) {
-                if (itr->version <= timestamp) {
-                    value = itr->value;
+            for ( ; x != NULL; x = x->next.load()) {
+                if (x->version <= timestamp) {
+                    value = x->value;
                     break;
                 }
             }
@@ -109,54 +116,83 @@ public:
     }
 
     bool write(int timestamp, Value value) {
-        // ri[xj], j=wr_ver < timestamp < i=rd_ts
         std::shared_lock<std::shared_mutex> lock(mtx);
-        for (auto itr = read_range.begin(); itr != read_range.end(); ++itr) {
+        // ri[xj], j=wr_ver < timestamp < i=rd_ts
+        for (auto itr = range_begin.next.load(); itr != NULL; itr=itr->next.load()) {
             if (itr->wr_ver < timestamp && timestamp < itr->rd_ts) {
                 DPRINTF("(abort %d<%d<%d)\n", itr->wr_ver, timestamp, itr->rd_ts);
                 return false;
             }
         }
-        for (auto itr = list.begin(); itr != list.end(); itr++) {
-            if (itr->version == timestamp) {
-                itr->value = value;
-                return true;
+        for (auto itr = &list_begin;; ) {
+            retry:
+            VersionValue *x = itr->next.load();
+            if (x->version < timestamp) {
+                VersionValue *m = (VersionValue *)malloc(sizeof(VersionValue));
+                m->version = timestamp;
+                m->value = value;
+                m->next.store(x);
+                bool b = itr->next.compare_exchange_weak(x,m);
+                if (!b) {
+                    free(m);
+                    goto retry;
+                }
+                break;
             } else
-            if (itr->version < timestamp) {
-                VersionValue vv = {timestamp,value};
-                list.insert(itr, vv); // must be atomic
+            if (x->version == timestamp) {
+                x->value = value;
                 return true;
             }
+            itr = x;
         }
-        VersionValue vv = {timestamp,value};
-        list.emplace_back(vv); // must be atomic
         return true;
     }
 
     void gc(int timestamp) {
         std::lock_guard<std::shared_mutex> lock(mtx);
-        while (!list.empty()) {
-            int v = list.back().version;
-            if (v >= timestamp) break;
-            list.pop_back();
+        for (auto itr = list_begin.next.load();; ) {
+            VersionValue *x = itr->next.load();
+            if (x == NULL) break;
+            if (x->version < timestamp) {
+                bool b = itr->next.compare_exchange_weak(x,&list_end);
+                if (!b) return;
+                for (;;) {
+                    auto y = x->next.load();
+                    if (y == NULL) break;
+                    //printf("[0x%lx,%d,%d]",(long)x,x->version,x->value);fflush(stdout);
+                    free(x);
+                    x = y;
+                }
+            }
+            itr = x;
         }
-        while (!read_range.empty()) {
-            int v = read_range.back().wr_ver;
-            if (v >= timestamp) break;
-            read_range.pop_back();
+        for (auto itr = range_begin.next.load();; ) {
+            ReadRange *x = itr->next.load();
+            if (x == NULL) break;
+            if (x->wr_ver < timestamp) {
+                bool b=itr->next.compare_exchange_weak(x,&range_end);
+                if (!b) return;
+                for (;;) {
+                    auto y = x->next.load();
+                    if (y == NULL) break;
+                    //printf(" 0x%lx ",(long)x);;fflush(stdout);
+                    free(x);
+                    x = y;
+                }
+            }
+            itr = x;
         }
     }
 
     void print() {
-        printf("ver:val(n=%ld){",std::distance(list.begin(),list.end()));
-        for (auto itr = list.begin(); itr != list.end(); itr++) {
-            printf("%d:%d,",itr->version,itr->value);
+        printf("ver:val(n=%ld){",0L);
+        for (auto x = list_begin.next.load(); x != NULL; x = x->next.load()) {
+            printf("%d:%d,",x->version,x->value);
         }
-        printf("%d:%d",0,v0);
         printf("}\n");
-        printf("ri[xj](n=%ld){",std::distance(read_range.begin(),read_range.end()));
-        for (auto itr = read_range.begin(); itr != read_range.end(); itr++) {
-            printf("%d:%d,",itr->rd_ts,itr->wr_ver);
+        printf("ri[xj](n=%ld){", 0L);
+        for (auto x = range_begin.next.load(); x != NULL; x = x->next.load()) {
+            printf("%d:%d,",x->rd_ts,x->wr_ver);
         }
         printf("}\n");
     }
