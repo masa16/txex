@@ -71,45 +71,46 @@ public:
     //DataItem(Value value) : list(0), read_range(0), v0(value) {}
 
     Value read(int timestamp) {
+        // timestamp=7 のトランザクションが x を読むとする。
         std::shared_lock<std::shared_mutex> lock(mtx);
         VersionValue *x = list_begin.next.load();
         // read first_item == max_version
+        // listの先頭が最大バージョンである。
         Value value = x->value;
         int ver = x->version;
-        if (timestamp >= ver) {
-            if (timestamp > ver + 1) {
-                // record ri[xj], i=rd_ts, j=wr_ver
-                DPRINTF("r%d(x%d)",timestamp,ver);
-                for (auto i = &range_begin; ; i=i->next.load()) {
-                retry:
-                    ReadRange *x = i->next.load();
-                    if (x->next.load() == NULL || x->wr_ver < ver) {
-                        ReadRange *m = (ReadRange *)malloc(sizeof(ReadRange));
-                        m->wr_ver = ver;
-                        m->rd_ts = timestamp;
-                        m->next.store(x);
-                        bool b = i->next.compare_exchange_weak(x,m);
-                        if (!b) {
-                            free(m);
-                            goto retry;
-                        }
-                        break;
-                    } else
-                    if (x->wr_ver == ver) {
-                        if (x->rd_ts < timestamp) {
-                            x->rd_ts = timestamp;
-                        }
-                        break;
-                    }
-                }
+        // timestamp=7 より新しいバージョン x9 が書かれている場合
+        // 7より小さい最大のバージョン x3 を見つけて読む。
+        for ( ; x != NULL; x = x->next.load()) {
+            if (x->version <= timestamp) {
+                value = x->value;
+                ver = x->version;
+                break;
             }
-        } else {
-            // find max_version with <= timestamp
-            for ( ; x != NULL; x = x->next.load()) {
-                if (x->version <= timestamp) {
-                    value = x->value;
-                    break;
+        }
+        // record ri[xj], i=rd_ts, j=wr_ver
+        // x3 を読むとき、r7[x3] を ReadRange に加える。
+        DPRINTF("r%d(x%d)",timestamp,ver);
+        for (auto i = &range_begin; ; i=i->next.load()) {
+        retry:
+            ReadRange *x = i->next.load();
+            if (x->next.load() == NULL || x->wr_ver < ver) {
+                ReadRange *m = (ReadRange *)malloc(sizeof(ReadRange));
+                m->wr_ver = ver;
+                m->rd_ts = timestamp;
+                m->next.store(x);
+                bool b = i->next.compare_exchange_weak(x,m);
+                if (!b) {
+                    free(m);
+                    goto retry;
                 }
+                break;
+            } else
+            if (x->wr_ver == ver) {
+                // r5[x3] がある場合、r7[x3] に広げる
+                if (x->rd_ts < timestamp) {
+                    x->rd_ts = timestamp;
+                }
+                break;
             }
         }
         return value;
@@ -117,13 +118,16 @@ public:
 
     bool write(int timestamp, Value value) {
         std::shared_lock<std::shared_mutex> lock(mtx);
-        // ri[xj], j=wr_ver < timestamp < i=rd_ts
+        // If a step of the form rj(xk) such that ts(tk) < ts(ti) < ts(tj)
+        // has already been scheduled, then wi(x) is rejected and ti is aborted.
         for (auto itr = range_begin.next.load(); itr != NULL; itr=itr->next.load()) {
+            // ri[xj], j=wr_ver < timestamp < i=rd_ts
             if (itr->wr_ver < timestamp && timestamp < itr->rd_ts) {
                 DPRINTF("(abort %d<%d<%d)\n", itr->wr_ver, timestamp, itr->rd_ts);
                 return false;
             }
         }
+        // abortしなければ VersionValue のリストに加える
         for (auto itr = &list_begin;; ) {
             retry:
             VersionValue *x = itr->next.load();
@@ -149,6 +153,7 @@ public:
     }
 
     void gc(int timestamp) {
+        // timestamp より小さい item を削除する。
         std::lock_guard<std::shared_mutex> lock(mtx);
         for (auto itr = list_begin.next.load();; ) {
             VersionValue *x = itr->next.load();
@@ -238,6 +243,13 @@ public:
                 }
             }
         }
+        /*
+          ts_list = [10,11,12,13,14] => 10未満でGCできる
+          ↓ ts = 11,12 が終了         => ts != ts_list.front()
+          ts_list = [10, 13,14]      => 10が残っているのでGCできない
+          ↓ ts = 10 が終了            => ts == ts_list.front()
+          ts_list = [13,14]          => 13の前までGCできる
+         */
         if (ts1>0 && ts1-ts0 > 10) {
             gc_count_.fetch_add(1);
             DPRINTF("\nGC: ts0=%d ts1=%d ts_list.size=%ld\n",ts0,ts1,ts_list.size());
